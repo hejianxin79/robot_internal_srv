@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<launch>
+  <include file="$(find hand_controller_ros)/launch/hand_controller.launch"/>
+  <include file="$(find head_controller_ros)/launch/head_controller.launch"/>
+  <!-- <include file="$(find head_controller_ros)/launch/columbus_head.launch"/> -->
+  <!-- Start yolov5 and ros wrapper -->
+  <node pkg="robot_internal_srv" type="robot_internal_server.py" name="robot_internal_srv" output="screen" >
+  <param name="joint_topic"       value="/cb_pos_vel_trajectory_controller/command" /> 
+  <param name="yolov8_topic"       value="/yolov8/detection_msg" />  <!--  yolov8视觉识别话题  -->
+  <!-- <param name="is_simulation"       value="True"/>  是否为仿真环境  -->
+  <param name="is_filtering"    value="True" />  <!--  是否过滤  -->
+  </node>
+</launch>

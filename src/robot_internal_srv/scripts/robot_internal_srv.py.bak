@@ -1,0 +1,16 @@
+#! /usr/bin/env python3
+import rospy
+
+from robot_internal_srv import internal,internalRequest, internalResponse
+
+
+def doReq(req):
+    rospy.loginfo(req.req)
+
+    resp = internalResponse("123")
+    return resp
+
+if __name__ == "__main__":
+    rospy.init_node("robot_internal_server", anonymous=True)
+    server = rospy.Service("internal", internal, doReq)
+    rospy.spin()

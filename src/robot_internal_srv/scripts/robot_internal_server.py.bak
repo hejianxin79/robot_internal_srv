@@ -1,0 +1,363 @@
+#! /usr/bin/env python3
+import rospy, sys, os, yaml, json,time, glob,threading
+
+from trajectory_msgs.msg import *
+from std_msgs.msg import Header, String
+from sensor_msgs.msg import JointState
+from robot_internal_srv.srv import internal,internalRequest, internalResponse
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from utils.chassis_controller import ChassisController
+from utils.color_msg import ColorMsg
+
+
+class RobotInternalServer:
+    def __init__(self) -> None:
+        self.chassis_controller = ChassisController()
+        # 机械臂话题
+        self.joint_topic = rospy.get_param("~joint_topic", "/joint_states")
+        # 是否为仿真环境
+        self.is_simulation = rospy.get_param("~is_simulation", True)
+        self.server = rospy.Service("robot_internal_srv", internal, self.server_cb)
+        self.pub = rospy.Publisher(self.joint_topic, JointState, queue_size=10)
+        self.is_record_loop = True
+        self.is_play_loop = True
+        self.params = ""
+        self.data = {}
+        self.data["id"] = 0
+        self.data["msg"] = ""
+        self.data["code"] = -1
+        self.data["params"] = {}
+        self.positions = []
+        self.getAllFile(ext=".txt")
+        ColorMsg(msg="机械臂录制/发布服务已启动", color="green")
+        ColorMsg(msg="底盘服务已启动", color="green")
+        #self.server = rospy.Service("robot_internal_srv", params, self.server_cb)
+        self.pub = rospy.Publisher("/engine_control_cmd", String, queue_size=1)
+        self.pub_map = rospy.Publisher("/robot_chassis_map", String, queue_size=1)
+        self.action_factories = self.chassis_controller.get_action_factories()
+        self.thread = None  
+        #self.data = None  # 初始化数据，这里可以是一个可变对象，比如列表、字典等  
+        self.lock = threading.Lock()  # 创建锁来同步访问数据
+        self.action_id = 0
+        self.pub_id = 0
+        self.rs = {}
+        
+        self.start_thread()
+    
+    def start_thread(self):  
+        def thread_function():  
+            while True:  
+                with self.lock:  # 使用锁来确保安全地访问数据  
+                    if self.action_id is not None:  
+                        print(f"线程接收到数据: {self.action_id}")
+                        # res为元组类型
+                        res = self.chassis_controller.get_current_action_by_id(action_id=self.action_id)
+                        if res != None:
+                            if res[0]["action_id"] == self.action_id and res[0]["state"]["status"] == 4:
+                                ColorMsg(msg=f"action_id:{self.action_id} 移动点位任务完成", color="green")
+                                if self.pub_id != self.action_id:
+                                    print("发布信息")
+                                    data = String()
+                                    # 构造JSON消息  
+                                    message_json = {  
+                                        "method": "notify_navi_result",  
+                                        "id": 121212,  
+                                        "params": res[0]
+                                    }
+                                    message_str = json.dumps(message_json)
+                                    data.data = message_str
+                                    self.pub.publish(data)
+                                    self.pub_id = self.action_id
+                                else:
+                                    print(f"action_id:{self.action_id} 信息已经发布过.....")
+                            elif res[0]["action_id"] == self.action_id and res[0]["state"]["status"] == 1:
+                                ColorMsg(msg=f"action_id:{self.action_id} 移动点位任务正在移动中.....", color="yellow")
+                        # 处理数据...  
+                    else:  
+                        print("线程已结束请按：Ctrl+C终止程序运行...")
+                        break
+                time.sleep(0.5)
+        self.thread = threading.Thread(target=thread_function)  
+        self.thread.start()
+
+    def update_id(self, new_id):  
+        with self.lock:  # 使用锁来确保安全地更新数据  
+            self.action_id = new_id  
+  
+    def stop_thread(self):  
+        if self.thread:  
+            self.update_id(None)  # 发送一个信号让线程退出循环
+            self.thread.join() 
+
+    def getAllFile(self, ext):
+        txt_file = glob.glob("*"+ext)
+        tmp = []
+        for f in txt_file:
+            file_name, file_ext = os.path.splitext(f)
+            tmp.append(file_name)
+        ColorMsg(msg="当前存在的动作有:"+str(tmp), color="yellow")
+
+
+    def server_cb(self,req):
+        json_key2 = "params"
+        #try:
+        result = json.loads(req.req)
+        # print(result["method"])
+        self.data["method"] = result["method"]
+        self.data["params"]["task_id"] =result["params"]["task_id"]
+        self.data["id"] = result["id"]
+        self.data["timestamp"] = time.time()
+        self.data["ros_time"] = rospy.Time.now().to_sec()
+        # 判断参数是否正确
+        if result.get("method") is None or result.get("id") is None or result.get("params") is None:
+            self.data["msg"] = "缺少必要参数，请查看手册"
+            ColorMsg(msg=self.data["msg"], color="red")
+            resp = internalResponse(json.dumps(self.data, ensure_ascii=False))
+            return resp
+        if result["method"] == "start_record_motion":  # 开始录制
+            ColorMsg(msg="机械臂动作录制开启", color="yellow")
+            self.is_record_loop = True
+            self.data["id"] = result["id"]
+            self.data["params"] = result["params"]
+            self.data["code"] = 0
+            self.data["msg"] = "OK"
+            self.start_record_motion(id=result["id"], params=result["params"])
+            resp = internalResponse(json.dumps(self.data, ensure_ascii=False))
+            return resp
+        if result["method"] == "stop_record_motion": # 停止录制
+            self.is_record_loop = False
+            self.data["id"] = result["id"]
+            self.data["params"] = result["params"]
+            self.data["code"] = 0
+            self.data["msg"] = "OK"
+            resp = internalResponse(json.dumps(self.data, ensure_ascii=False))
+            ColorMsg(msg="已停止录制机械臂动作", color="green")
+            return resp
+        if result["method"] == "start_play_motion": # 开始播放
+            self.is_play_loop = True
+            #self.joint_topic = rospy.get_param("~joint_topic", "/joint_states")
+            self.data["id"] = result["id"]
+            self.data["params"] = result["params"]
+            self.data["code"] = 0
+            self.data["msg"] = "OK"
+            resp = internalResponse(json.dumps(self.data, ensure_ascii=False))
+            self.start_play_motion(id=result["id"], params=result["params"])
+            if self.is_play_loop == False:
+                self.data["msg"] = "机械臂发布被终止"
+            return resp
+        if result["method"] == "stop_play_motion": # 停止播放
+            self.is_play_loop = False
+            self.data["id"] = result["id"]
+            self.data["params"] = result["params"]
+            self.data["code"] = 0
+            self.data["msg"] = "OK"
+            ColorMsg(msg="已停止发布机械臂动作", color="green")
+            resp = internalResponse(json.dumps(self.data, ensure_ascii=False))
+            return resp
+        ''' ---------------------------------以下为底盘------------------------------------------ '''
+        if json_key2 in result:
+            par = result["params"]
+            if result["method"] == "set_map":
+                # 设置当前地图持久化，只调用一次即可
+                self.data["params"], http_code = self.chassis_controller.set_map()
+                resp = internalResponse(json.dumps(self.data, ensure_ascii=False))
+                return resp
+            if result["method"] == "exit_thread":
+                self.stop_thread()
+                resp = internalResponse(json.dumps(self.data, ensure_ascii=False))
+                return resp
+            if result["method"] == "init_point": # 初始化点位到消防栓下
+                self.chassis_controller.init_point()
+                resp = internalResponse(json.dumps(self.data, ensure_ascii=False))
+                return resp
+            if result["method"] == "get_all_poi":
+                # 获取所有点位
+                pois, http_code = self.chassis_controller.get_all_pois()
+                if http_code == 200:
+                    self.data["params"]["code"] = 0
+                    self.data["params"]["msg"] = "success"
+                    # self.data["params"]["data"] = pois
+                else:
+                    self.data["params"]["code"] = -1
+                    self.data["params"]["msg"] = "error"
+                    # self.data["params"]["data"] = []
+                resp = internalResponse(json.dumps(self.data, ensure_ascii=False))
+                return resp
+            if result["method"] == "get_status":
+                # 获取底盘状态
+                status = self.chassis_controller.get_status()
+                if http_code == 200:
+                    self.data["params"]["code"] = 0
+                    self.data["params"]["msg"] = "success"
+                    # self.data["params"]["data"] = status
+                else:
+                    self.data["params"]["code"] = -1
+                    self.data["params"]["msg"] = "error"
+                    # self.data["params"]["data"] = []
+                resp = internalResponse(json.dumps(self.data, ensure_ascii=False))
+                return resp
+            if result["method"] == "start_navi":
+                #par = result["params"]
+                self.data["params"] = {}
+                point_name = par.get("target_name", None)
+                point_pose = par.get("target_pose", None)
+                if point_pose != None or point_name != None:
+                    move, http_code = self.chassis_controller.move_point(point_name=point_name,point_pose=point_pose)
+                    if http_code == 200:
+                        self.data["params"]["code"] = 0
+                        self.data["params"]["msg"] = "success"
+                        # self.data["params"]["data"] = move
+                    else:
+                        self.data["params"]["code"] = -1
+                        self.data["params"]["msg"] = "error"
+                        # self.data["params"]["data"] = move
+                else:
+                    self.data["params"]["code"] = -1
+                    self.data["params"]["msg"] = "参数错误"
+                    # self.data["params"]["data"] = []
+                # self.action_id = move["action_id"]
+                print(self.data)
+                resp = internalResponse(json.dumps(self.data, ensure_ascii=False))
+                return resp
+            if result["method"] == "stop_navi":
+                self.data["params"] = {}
+                # 取消导航
+                stop_move, http_code = self.chassis_controller.cancel_move()
+                if http_code == 200:
+                    self.data["params"]["code"] = 0
+                    self.data["params"]["msg"] = "success"
+                    # self.data["params"]["data"] = stop_move
+                else:
+                    self.data["params"]["code"] = -1
+                    self.data["params"]["msg"] = "error"
+                    # self.data["params"]["data"] = stop_move
+                resp = internalResponse(json.dumps(self.data, ensure_ascii=False))
+                return resp
+            if result["method"] == "navi_status":
+                # 查询当前导航状态
+                navi_status, http_code = self.chassis_controller.get_move_status(action_id=par["action_id"])
+                if isinstance(navi_status, str) == True:
+                    # 字符串格式说明没有这个ID任务
+                    self.data["params"]["code"] = -1
+                    self.data["params"]["msg"] = "error"
+                    # self.data["params"]["data"] = navi_status
+
+                else:
+                    self.data["params"]["code"] = 0
+                    self.data["params"]["msg"] = "success"
+                    # self.data["params"]["data"] = navi_status
+                resp = internalResponse(json.dumps(self.data, ensure_ascii=False))
+                return resp
+            else:
+                # self.rs["msg"] = "error"
+                # ColorMsg(msg="指令错误，请检查手册", color="red")
+                # res = json.dumps(self.rs)
+                # resp = internalResponse(res)
+                # return resp
+                pass
+
+        else:
+            ColorMsg(msg="没有这个命令，请查看手册", color="red")
+        # except:
+        #     ColorMsg(msg="命令执行错误，请查看手册", color="red")
+        
+    # 录制机械臂动作
+    def start_record_motion(self,id,params):
+        self.params = params
+        if self.is_simulation:
+            # 异步队列，不可控，暂时不使用
+            #self.sub = rospy.Subscriber(self.joint_topic,JointState,self.start_record_motion_msg,queue_size=10)
+            while self.is_loop:
+                msg = rospy.wait_for_message(self.joint_topic, JointState, timeout=0.1)
+                tmp = {}
+                tmp["names"] = msg.name
+                tmp["position"] = list(msg.position)
+                self.positions.append(tmp)
+            self.positionToFile(positions=self.positions)
+
+    # 由于异步队列，即便注销接收的话题，依然不能处理队列池，暂时不用
+    '''
+    def start_record_motion_msg(self,data):
+        tmp = {}
+        tmp["names"] = data.name
+        tmp["position"] = list(data.position)
+        self.positions.append(tmp)
+        #print(tmp["positions"])
+        if self.is_loop == False:
+            # 注销订阅者以停止接收话题
+            self.sub.unregister()
+            self.positionToFile(positions=self.positions)
+        rospy.sleep(0.1)
+    '''
+    # 写入文件
+    def positionToFile(self, positions):
+        file = str(self.params)+".txt"
+        # 打开文件以写入模式  
+        with open(file, 'w', encoding='utf-8') as f:  
+            # 遍历列表中的每个元素  
+            for item in positions:
+                # 将元素写入文件，并在每个元素后添加一个换行符  
+                f.write("%s\n" % json.dumps(item))
+                ColorMsg(msg="--------------成功写入一条信息-----------------", color="yellow")
+                print(json.dumps(item))
+        ColorMsg(msg="文件写入成功", color="green")
+
+    # 播放动作
+    def start_play_motion(self, id, params):
+        ColorMsg(msg="开始播放"+str(params)+"动作", color="green")
+        positions = self.readFile(file_name=params)
+        for item in positions:
+            if self.is_play_loop:
+                self.pubJointMsg(positions=json.loads(item))
+            else:
+                #self.pub.unregister()
+                break
+
+    def readFile(self, file_name):
+        data = []
+        with open(file_name+".txt", 'r', encoding='utf-8') as file:  
+            # 读取文件全部内容  
+            # data = file.read()
+            for line in file:
+                data.append(line)
+        return data
+
+
+    def pubJointMsg(self, positions):
+        if self.is_simulation == True:
+            # 仿真机械臂
+            joint_state = JointState()
+            joint_state.header = Header()
+            joint_state.header.frame_id = "world"
+            joint_state.header.stamp = rospy.Time.now()
+            joint_state.name = positions["names"]
+            joint_state.position = positions["position"]
+            self.pub.publish(joint_state)
+            time.sleep(0.1)
+            ColorMsg(msg="机械臂发布功能已开启，当前为仿真机械臂", color="green")
+        else:
+            # 真实机械臂
+            # 创建轨迹消息
+            trajectory_msg = JointTrajectory()
+            trajectory_msg.header = Header()
+            trajectory_msg.header.frame_id = "world"
+            trajectory_msg.header.stamp = rospy.Time.now()
+            trajectory_msg.joint_names = positions["names"]
+            # 创建轨迹点
+            joint_trajectory_point = JointTrajectoryPoint()
+            # joint_trajectory_point.velocities = self.v
+            # joint_trajectory_point.accelerations = self.v
+            joint_trajectory_point.positions = positions["position"]
+            joint_trajectory_point.time_from_start = rospy.Duration(2)
+            trajectory_msg.points.append(joint_trajectory_point)
+            # 发布轨迹消息
+            self.pub.publish(trajectory_msg)
+            time.sleep(0.1)
+            ColorMsg(msg="机械臂发布功能已开启，当前为真实机械臂", color="green")
+
+if __name__ == "__main__":
+    rospy.init_node("robot_internal_server", anonymous=True)
+    r = RobotInternalServer()
+    rospy.spin()
+    
+    

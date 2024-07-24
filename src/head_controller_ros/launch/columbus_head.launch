@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<launch>
+  <node pkg="head_controller_ros" type="columbus_head.py" name="head_controller_ros" output="screen" >
+  </node>
+</launch>

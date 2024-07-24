@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<launch>
+  <!-- Start yolov5 and ros wrapper -->
+  <node pkg="hand_controller_ros" type="hand_arm_controller.py" name="hand_controller_ros" output="screen" >
+  <param name="head_arm_sub"       value="/head_hand_cmd" /> 
+  <param name="joint_cmd_pub"       value="/cb_joint_cmd" /> 
+  </node>
+</launch>

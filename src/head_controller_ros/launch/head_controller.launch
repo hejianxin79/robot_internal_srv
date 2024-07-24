@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<launch>
+  <node pkg="head_controller_ros" type="head_controller.py" name="head_controller_ros" output="screen" >
+  <param name="topic"       value="/head_hand_cmd" /> 
+  </node>
+</launch>
